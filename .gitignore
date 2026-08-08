@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.env
+*.mp3
+*.wav
+*.m4a
+*.flac
+!examples/.gitkeep

@@ -1,0 +1,43 @@
+{
+  "title": "brat sample",
+  "lines": [
+    {
+      "start": 0.0,
+      "words": [
+        { "text": "brat", "start": 0.0 },
+        { "text": "and", "start": 0.35 },
+        { "text": "it's", "start": 0.55 }
+      ]
+    },
+    {
+      "start": 1.0,
+      "words": [
+        { "text": "the", "start": 1.0 },
+        { "text": "same", "start": 1.2 },
+        { "text": "but", "start": 1.55 }
+      ]
+    },
+    {
+      "start": 1.9,
+      "words": [
+        { "text": "there's", "start": 1.9 },
+        { "text": "three", "start": 2.25 }
+      ]
+    },
+    {
+      "start": 2.65,
+      "words": [
+        { "text": "more", "start": 2.65 },
+        { "text": "songs", "start": 2.95 }
+      ]
+    },
+    {
+      "start": 3.4,
+      "words": [
+        { "text": "so", "start": 3.4 },
+        { "text": "it's", "start": 3.65 },
+        { "text": "not", "start": 3.95 }
+      ]
+    }
+  ]
+}
