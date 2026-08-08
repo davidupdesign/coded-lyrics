@@ -1,11 +1,19 @@
 import type { LineCue, Theme, WordCue } from "./types.js";
-import { FONT_H, renderBigRow, wordCellWidth } from "./bigfont.js";
+import {
+  ENTRANCE_MS,
+  FONT_H,
+  renderBigRow,
+  wordCellWidth,
+  type WordPaintStyle,
+} from "./bigfont.js";
 
 const ESC = "\x1b";
 const HIDE_CURSOR = `${ESC}[?25l`;
 const SHOW_CURSOR = `${ESC}[?25h`;
 const CLEAR = `${ESC}[2J${ESC}[H`;
 const RESET = `${ESC}[0m`;
+const ITALIC_ON = `${ESC}[3m`;
+const ITALIC_OFF = `${ESC}[23m`;
 
 /** Prefer this many words per wrapped row */
 const WORDS_PER_ROW = 4;
@@ -16,33 +24,8 @@ const MIN_WORD_GAP = 2;
 /** Blank rows between stacked lyric rows so outlines never touch */
 const ROW_SPACING = 1;
 
-/** Outline symbols cycled every 100ms. */
-const OUTLINE_RAMP = [
-  "#",
-  "@",
-  "$",
-  "%",
-  "&",
-  "*",
-  "+",
-  "!",
-  "/",
-  "\\",
-  "|",
-  "(",
-  ")",
-  "[",
-  "]",
-  "{",
-  "}",
-  "<",
-  ">",
-  "~",
-  "^",
-] as const;
-
-/** Dense, stable background pattern. */
-const BG_PATTERN = ["=", "=", "+", "-", ":", ".", "=", "+", "~", "-"] as const;
+/** Single consistent background fill. */
+const BG_CHAR = "=";
 
 /** Widest block we allow, given the terminal width. */
 export function rowCellBudget(cols: number): number {
@@ -68,15 +51,6 @@ function hashSeed(n: number): number {
   h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
   h ^= h >>> 16;
   return h >>> 0;
-}
-
-function patternChar(x: number, y: number): string {
-  const i = hashSeed(x * 73856093 ^ y * 19349663) % BG_PATTERN.length;
-  return BG_PATTERN[i];
-}
-
-function outlineCharNow(): string {
-  return OUTLINE_RAMP[Math.floor(Date.now() / 100) % OUTLINE_RAMP.length];
 }
 
 /**
@@ -178,21 +152,40 @@ export function bratJustify(words: string[], targetWidth: number, rowSeed: numbe
   return out;
 }
 
+export interface BratBlockPaint {
+  lines: string[];
+  italic: boolean[][];
+}
+
+function wordStyleAt(
+  revealed: boolean,
+  wordStart: number,
+  elapsed: number,
+): WordPaintStyle | "hidden" {
+  if (!revealed) return "hidden";
+  const ageMs = (elapsed - wordStart) * 1000;
+  if (ageMs < ENTRANCE_MS) return "enter";
+  return "solid";
+}
+
 /**
  * Brat block as terminal rows (block font).
  * Widest packed row sets outer edges; others stretch word-gaps to match.
  */
 export function renderBratBlock(
   allWords: string[],
+  wordStarts: number[],
   revealedCount: number,
+  elapsed: number,
   budget = DEFAULT_ROW_CELL_BUDGET,
   rowSpacing = ROW_SPACING,
   perRow = WORDS_PER_ROW,
-  outlineChar = "#",
-): string[] {
+): BratBlockPaint {
   const lower = allWords.map((w) => w.toLowerCase());
   const rows = packRows(lower, perRow, budget);
-  if (rows.length === 0 || revealedCount <= 0) return [];
+  if (rows.length === 0 || revealedCount <= 0) {
+    return { lines: [], italic: [] };
+  }
 
   let blockWidth = 0;
   for (const row of rows) {
@@ -203,31 +196,49 @@ export function renderBratBlock(
   }
 
   let wordOffset = 0;
-  const out: string[] = [];
+  const lines: string[] = [];
+  const italic: boolean[][] = [];
+
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
     const row = rows[rowIndex];
     const rowStart = wordOffset;
     wordOffset += row.length;
     if (revealedCount <= rowStart) break;
 
-    const revealed = row.map((_, i) => rowStart + i < revealedCount);
+    const styles = row.map((_, i) => {
+      const global = rowStart + i;
+      return wordStyleAt(
+        global < revealedCount,
+        wordStarts[global] ?? 0,
+        elapsed,
+      );
+    });
     const gaps = bratGaps(row, blockWidth, rowIndex + 1);
-    const big = renderBigRow(row, revealed, gaps, outlineChar);
+    const big = renderBigRow(row, styles, gaps);
 
-    if (out.length > 0) {
-      for (let s = 0; s < rowSpacing; s++) out.push(" ".repeat(blockWidth));
+    if (lines.length > 0) {
+      for (let s = 0; s < rowSpacing; s++) {
+        lines.push(" ".repeat(blockWidth));
+        italic.push(Array.from({ length: blockWidth }, () => false));
+      }
     }
 
-    for (const line of big) {
-      // Pad to exact block width for edge hugging
+    for (let r = 0; r < big.lines.length; r++) {
+      const line = big.lines[r];
+      const ital = big.italic[r];
       if (line.length < blockWidth) {
-        out.push(line + " ".repeat(blockWidth - line.length));
+        lines.push(line + " ".repeat(blockWidth - line.length));
+        italic.push(
+          ital.concat(Array.from({ length: blockWidth - line.length }, () => false)),
+        );
       } else {
-        out.push(line.slice(0, blockWidth));
+        lines.push(line.slice(0, blockWidth));
+        italic.push(ital.slice(0, blockWidth));
       }
     }
   }
-  return out;
+
+  return { lines, italic };
 }
 
 /** Active line = last line whose start <= elapsed */
@@ -262,21 +273,47 @@ function padRow(content: string, cols: number): string {
   return clipped + " ".repeat(Math.max(0, cols - clipped.length));
 }
 
-function fillPatternRow(cols: number, y: number): string[] {
-  return Array.from({ length: cols }, (_, x) => patternChar(x, y));
+function fillPatternRow(cols: number): string[] {
+  return Array.from({ length: cols }, () => BG_CHAR);
 }
 
-/** Overlay `content` onto a pattern row; spaces in content leave the pattern. */
-function compositeRow(pattern: string[], content: string, left: number): string {
-  const out = pattern.slice();
+/**
+ * Overlay lyric content onto a pattern row. Spaces leave the pattern.
+ * Italic mask applies SGR 3 only around ink/outline cells of entering words.
+ */
+function compositeRow(
+  pattern: string[],
+  content: string,
+  italic: boolean[] | undefined,
+  left: number,
+): string {
+  const cells = pattern.slice();
+  const ital = Array.from({ length: pattern.length }, () => false);
   const start = Math.max(0, left);
   for (let i = 0; i < content.length; i++) {
     const x = start + i;
-    if (x >= out.length) break;
+    if (x >= cells.length) break;
     const ch = content[i];
-    if (ch !== " ") out[x] = ch;
+    if (ch !== " ") {
+      cells[x] = ch;
+      if (italic?.[i]) ital[x] = true;
+    }
   }
-  return out.join("");
+
+  let out = "";
+  let inItalic = false;
+  for (let x = 0; x < cells.length; x++) {
+    if (ital[x] && !inItalic) {
+      out += ITALIC_ON;
+      inItalic = true;
+    } else if (!ital[x] && inItalic) {
+      out += ITALIC_OFF;
+      inItalic = false;
+    }
+    out += cells[x];
+  }
+  if (inItalic) out += ITALIC_OFF;
+  return out;
 }
 
 export class BratRenderer {
@@ -308,14 +345,14 @@ export class BratRenderer {
 
     const footerRows = 2;
     const lyricRows = Math.max(1, rows - footerRows);
-    const outlineChar = outlineCharNow();
 
     const lineIdx = activeLineIndex(lines, elapsed);
-    let rendered: string[] = [];
+    let rendered: BratBlockPaint = { lines: [], italic: [] };
 
     if (lineIdx >= 0) {
       const line = lines[lineIdx];
       const allTexts = line.words.map((w) => w.text);
+      const wordStarts = line.words.map((w) => w.start);
       const revealed = revealedWords(line, elapsed).length;
       const budget = rowCellBudget(cols);
 
@@ -323,32 +360,55 @@ export class BratRenderer {
       for (const perRow of [WORDS_PER_ROW, 4, 5, 6]) {
         rendered = renderBratBlock(
           allTexts,
+          wordStarts,
           revealed,
+          elapsed,
           budget,
           ROW_SPACING,
           perRow,
-          outlineChar,
         );
-        if (rendered.length <= lyricRows) break;
+        if (rendered.lines.length <= lyricRows) break;
       }
-      if (rendered.length > lyricRows) {
-        rendered = renderBratBlock(allTexts, revealed, budget, 0, 6, outlineChar);
+      if (rendered.lines.length > lyricRows) {
+        rendered = renderBratBlock(
+          allTexts,
+          wordStarts,
+          revealed,
+          elapsed,
+          budget,
+          0,
+          6,
+        );
       }
-      if (rendered.length > lyricRows) {
-        rendered = rendered.slice(0, Math.max(FONT_H, lyricRows));
+      if (rendered.lines.length > lyricRows) {
+        const keep = Math.max(FONT_H, lyricRows);
+        rendered = {
+          lines: rendered.lines.slice(0, keep),
+          italic: rendered.italic.slice(0, keep),
+        };
       }
     }
 
-    const blockWidth = rendered.length > 0 ? rendered[0].length : 0;
+    const blockWidth = rendered.lines.length > 0 ? rendered.lines[0].length : 0;
     const blockLeft = Math.max(0, Math.floor((cols - blockWidth) / 2));
-    const topPad = Math.max(0, Math.floor((lyricRows - rendered.length) * 0.35));
+    const topPad = Math.max(
+      0,
+      Math.floor((lyricRows - rendered.lines.length) * 0.35),
+    );
     const outLines: string[] = [];
 
     for (let r = 0; r < lyricRows; r++) {
-      const pattern = fillPatternRow(cols, r);
+      const pattern = fillPatternRow(cols);
       const contentIdx = r - topPad;
-      if (contentIdx >= 0 && contentIdx < rendered.length) {
-        outLines.push(compositeRow(pattern, rendered[contentIdx], blockLeft));
+      if (contentIdx >= 0 && contentIdx < rendered.lines.length) {
+        outLines.push(
+          compositeRow(
+            pattern,
+            rendered.lines[contentIdx],
+            rendered.italic[contentIdx],
+            blockLeft,
+          ),
+        );
       } else {
         outLines.push(pattern.join(""));
       }
@@ -361,7 +421,6 @@ export class BratRenderer {
     const statusLine = ` ${state}  ${pos} / ${dur}`;
     const controlsLine = " space play/pause   ←/→ ±5s   s stop   q quit";
 
-    // Footer overwrites pattern so controls stay readable
     outLines.push(padRow(statusLine, cols));
     outLines.push(padRow(controlsLine, cols));
 
