@@ -9,10 +9,10 @@ const RESET = `${ESC}[0m`;
 
 /** Prefer this many words per wrapped row */
 const WORDS_PER_ROW = 3;
-/** Max block-font cell width before wrapping a row */
-const ROW_CELL_BUDGET = 42;
+/** Max hybrid-font cell width before wrapping (~2–3 letters × 4 cells + gaps) */
+const ROW_CELL_BUDGET = 40;
 /** Minimum gap (cells) between words */
-const MIN_WORD_GAP = 3;
+const MIN_WORD_GAP = 2;
 
 function themeColors(theme: Theme): { bg: string; fg: string } {
   if (theme === "white") {
