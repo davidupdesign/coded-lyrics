@@ -64,9 +64,11 @@ Needs a seekable player: **ffplay** (ffmpeg) or **mpv**. On this machine `ffplay
 [00:11.93] Popped out with my jeweler, yeah
 ```
 
-Plain LRC has no per-word times — words are front-loaded (~140ms apart) so they don’t lag when the vocal finishes early. For true karaoke word sync, use enhanced LRC (`<mm:ss.xx>word`) or JSON word timestamps.
+Plain LRC has no per-word times — words are front-loaded (~280ms apart) so they don’t lag when the vocal finishes early. Lines longer than six words are broken into consecutive screens. For true karaoke word sync, use enhanced LRC (`<mm:ss.xx>word`) or JSON word timestamps.
 
-Text is laid out in a Brat-style block: short rows, wide uneven gaps between words.
+Text is laid out in a Brat-style block: short rows, wide uneven gaps between words, and every row stretched to the same outer edges.
+
+Letters are drawn as symbol art — each one picks a dominant character from `# @ % ▓ & 8 $ 0 X M W B` and speckles the rest — and the block re-packs itself to fit whatever size your terminal is.
 
 **JSON** with explicit lines:
 

@@ -1,5 +1,5 @@
 import type { LineCue, Theme, WordCue } from "./types.js";
-import { renderBigRow, wordCellWidth } from "./bigfont.js";
+import { FONT_H, renderBigRow, wordCellWidth } from "./bigfont.js";
 
 const ESC = "\x1b";
 const HIDE_CURSOR = `${ESC}[?25l`;
@@ -9,10 +9,17 @@ const RESET = `${ESC}[0m`;
 
 /** Prefer this many words per wrapped row */
 const WORDS_PER_ROW = 3;
-/** Max hybrid-font cell width before wrapping (~2–3 letters × 4 cells + gaps) */
-const ROW_CELL_BUDGET = 40;
+/** Fallback wrap width when the terminal size is unknown */
+const DEFAULT_ROW_CELL_BUDGET = 56;
 /** Minimum gap (cells) between words */
-const MIN_WORD_GAP = 2;
+const MIN_WORD_GAP = 3;
+/** Blank rows between stacked lyric rows so descenders never touch */
+const ROW_SPACING = 1;
+
+/** Widest block we allow, given the terminal width. */
+export function rowCellBudget(cols: number): number {
+  return Math.max(16, Math.min(cols - 6, 72));
+}
 
 function themeColors(theme: Theme): { bg: string; fg: string } {
   if (theme === "white") {
@@ -39,7 +46,11 @@ function hashSeed(n: number): number {
  * Pack words into short rows of ~2–3 (Brat cover rhythm).
  * Sizes are in block-font cell widths.
  */
-export function packRows(words: string[], perRow = WORDS_PER_ROW): string[][] {
+export function packRows(
+  words: string[],
+  perRow = WORDS_PER_ROW,
+  budget = DEFAULT_ROW_CELL_BUDGET,
+): string[][] {
   if (words.length === 0) return [];
   const rows: string[][] = [];
   let current: string[] = [];
@@ -50,8 +61,8 @@ export function packRows(words: string[], perRow = WORDS_PER_ROW): string[][] {
       wordCellWidth(word) +
       current.length * MIN_WORD_GAP;
     const wouldOverflow =
-      current.length >= 2 &&
-      (current.length >= perRow || nextLen > ROW_CELL_BUDGET);
+      current.length >= 1 &&
+      (current.length >= perRow || nextLen > budget);
     if (wouldOverflow) {
       rows.push(current);
       current = [word];
@@ -125,9 +136,15 @@ export function bratJustify(words: string[], targetWidth: number, rowSeed: numbe
  * Brat block as terminal rows (block font).
  * Widest packed row sets outer edges; others stretch word-gaps to match.
  */
-export function renderBratBlock(allWords: string[], revealedCount: number): string[] {
+export function renderBratBlock(
+  allWords: string[],
+  revealedCount: number,
+  budget = DEFAULT_ROW_CELL_BUDGET,
+  rowSpacing = ROW_SPACING,
+  perRow = WORDS_PER_ROW,
+): string[] {
   const lower = allWords.map((w) => w.toLowerCase());
-  const rows = packRows(lower);
+  const rows = packRows(lower, perRow, budget);
   if (rows.length === 0 || revealedCount <= 0) return [];
 
   let blockWidth = 0;
@@ -150,7 +167,10 @@ export function renderBratBlock(allWords: string[], revealedCount: number): stri
     const gaps = bratGaps(row, blockWidth, rowIndex + 1);
     const big = renderBigRow(row, revealed, gaps);
 
-    // No blank spacer between lyric rows — keep the block tight
+    if (out.length > 0) {
+      for (let s = 0; s < rowSpacing; s++) out.push(" ".repeat(blockWidth));
+    }
+
     for (const line of big) {
       // Pad to exact block width for edge hugging
       if (line.length < blockWidth) {
@@ -232,7 +252,19 @@ export class BratRenderer {
       const line = lines[lineIdx];
       const allTexts = line.words.map((w) => w.text);
       const revealed = revealedWords(line, elapsed).length;
-      rendered = renderBratBlock(allTexts, revealed);
+      const budget = rowCellBudget(cols);
+
+      // Pack tighter (more words per row, then no row spacing) until it fits
+      for (const perRow of [WORDS_PER_ROW, 4, 5, 6]) {
+        rendered = renderBratBlock(allTexts, revealed, budget, ROW_SPACING, perRow);
+        if (rendered.length <= lyricRows) break;
+      }
+      if (rendered.length > lyricRows) {
+        rendered = renderBratBlock(allTexts, revealed, budget, 0, 6);
+      }
+      if (rendered.length > lyricRows) {
+        rendered = rendered.slice(0, Math.max(FONT_H, lyricRows));
+      }
     }
 
     const blockWidth = rendered.length > 0 ? rendered[0].length : 0;

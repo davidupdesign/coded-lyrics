@@ -56,8 +56,19 @@ function frontloadWords(tokens: string[], start: number): WordCue[] {
   return tokens.map((token, idx) => ({ text: token, start: start + idx * step }));
 }
 
+/** Split into the fewest near-equal chunks that all fit within `size`. */
+function chunkEvenly<T>(items: T[], size: number): T[][] {
+  const count = Math.ceil(items.length / size);
+  const per = Math.ceil(items.length / count);
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += per) {
+    out.push(items.slice(i, i + per));
+  }
+  return out;
+}
+
 /**
- * Long lyric lines become two timed screens: first half alone, then second half alone
+ * Long lyric lines become several timed screens shown one after another
  * (same behavior as separate LRC lines). Short lines are unchanged.
  */
 export function expandLongLines(lines: LineCue[]): LineCue[] {
@@ -70,43 +81,35 @@ export function expandLongLines(lines: LineCue[]): LineCue[] {
       continue;
     }
 
-    const mid = Math.ceil(line.words.length / 2);
-    const first = line.words.slice(0, mid);
-    const second = line.words.slice(mid);
-    const nextStart = lines[i + 1]?.start;
+    const chunks = chunkEvenly(line.words, SPLIT_ABOVE);
+    const timedChunks = chunks
+      .slice(1)
+      .every((chunk) => chunk[0].start > line.start + 0.05);
 
-    const distinctSecond =
-      second[0].start > first[0].start + 0.05 && second[0].start > line.start + 0.05;
-
-    if (distinctSecond) {
-      out.push({ start: line.start, words: first });
-      out.push({ start: second[0].start, words: second });
+    if (timedChunks) {
+      out.push({ start: line.start, words: chunks[0] });
+      for (const chunk of chunks.slice(1)) {
+        out.push({ start: chunk[0].start, words: chunk });
+      }
       continue;
     }
 
-    // Plain LRC front-load: retime each half as its own screen
-    let secondStart: number;
-    if (nextStart != null && nextStart > line.start) {
-      secondStart = line.start + (nextStart - line.start) / 2;
-    } else {
-      const firstBurst =
-        first.length * Math.min(WORD_MS, BURST_CAP_MS / first.length) / 1000;
-      secondStart = line.start + firstBurst + 0.2;
-    }
+    // Plain LRC front-load: share the line's span between the screens and retime each
+    const nextStart = lines[i + 1]?.start;
+    const slot =
+      nextStart != null && nextStart > line.start
+        ? (nextStart - line.start) / chunks.length
+        : (SPLIT_ABOVE * WORD_MS) / 1000 + 0.2;
 
-    out.push({
-      start: line.start,
-      words: frontloadWords(
-        first.map((w) => w.text),
-        line.start,
-      ),
-    });
-    out.push({
-      start: secondStart,
-      words: frontloadWords(
-        second.map((w) => w.text),
-        secondStart,
-      ),
+    chunks.forEach((chunk, index) => {
+      const startAt = line.start + index * slot;
+      out.push({
+        start: startAt,
+        words: frontloadWords(
+          chunk.map((w) => w.text),
+          startAt,
+        ),
+      });
     });
   }
 
