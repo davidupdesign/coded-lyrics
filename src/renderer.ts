@@ -1,10 +1,18 @@
 import type { LineCue, Theme, WordCue } from "./types.js";
+import { renderBigRow, wordCellWidth } from "./bigfont.js";
 
 const ESC = "\x1b";
 const HIDE_CURSOR = `${ESC}[?25l`;
 const SHOW_CURSOR = `${ESC}[?25h`;
 const CLEAR = `${ESC}[2J${ESC}[H`;
 const RESET = `${ESC}[0m`;
+
+/** Prefer this many words per wrapped row */
+const WORDS_PER_ROW = 3;
+/** Max block-font cell width before wrapping a row */
+const ROW_CELL_BUDGET = 42;
+/** Minimum gap (cells) between words */
+const MIN_WORD_GAP = 3;
 
 function themeColors(theme: Theme): { bg: string; fg: string } {
   if (theme === "white") {
@@ -19,65 +27,140 @@ function themeColors(theme: Theme): { bg: string; fg: string } {
   };
 }
 
-/** Deterministic irregular gap (1–5 spaces) — Brat-style */
-export function irregularGap(wordIndex: number): string {
-  let h = (wordIndex + 1) * 2654435761;
+function hashSeed(n: number): number {
+  let h = n | 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
   h ^= h >>> 16;
-  const r = (h >>> 0) % 10;
-  const count = r < 3 ? 1 : r < 6 ? 2 : r < 8 ? 3 : r < 9 ? 4 : 5;
-  return " ".repeat(count);
-}
-
-export interface LayoutWord {
-  text: string;
-  index: number;
+  return h >>> 0;
 }
 
 /**
- * Soft-wrap words into short Brat-like lines (target ~18–28 visible cols).
+ * Pack words into short rows of ~2–3 (Brat cover rhythm).
+ * Sizes are in block-font cell widths.
  */
-export function layoutLines(
-  words: LayoutWord[],
-  maxWidth = 28,
-): LayoutWord[][] {
+export function packRows(words: string[], perRow = WORDS_PER_ROW): string[][] {
   if (words.length === 0) return [];
+  const rows: string[][] = [];
+  let current: string[] = [];
 
-  const lines: LayoutWord[][] = [];
-  let current: LayoutWord[] = [];
-  let width = 0;
-
-  for (const w of words) {
-    const gap = current.length === 0 ? 0 : irregularGap(w.index).length;
-    const nextWidth = width + gap + w.text.length;
-    const endsPhrase = /[.,!?;:]$/.test(w.text);
-
-    if (current.length > 0 && nextWidth > maxWidth) {
-      lines.push(current);
-      current = [w];
-      width = w.text.length;
+  for (const word of words) {
+    const nextLen =
+      current.reduce((n, w) => n + wordCellWidth(w), 0) +
+      wordCellWidth(word) +
+      current.length * MIN_WORD_GAP;
+    const wouldOverflow =
+      current.length >= 2 &&
+      (current.length >= perRow || nextLen > ROW_CELL_BUDGET);
+    if (wouldOverflow) {
+      rows.push(current);
+      current = [word];
     } else {
-      current.push(w);
-      width = nextWidth;
-    }
-
-    if (endsPhrase && current.length >= 2) {
-      lines.push(current);
-      current = [];
-      width = 0;
+      current.push(word);
     }
   }
+  if (current.length > 0) rows.push(current);
 
-  if (current.length > 0) lines.push(current);
-  return lines;
+  if (rows.length >= 2) {
+    const last = rows[rows.length - 1];
+    const prev = rows[rows.length - 2];
+    if (last.length === 1 && prev.length >= 3) {
+      last.unshift(prev.pop()!);
+    }
+  }
+  return rows;
 }
 
-function renderLine(words: LayoutWord[]): string {
-  return words
-    .map((w, i) => {
-      const gap = i === 0 ? "" : irregularGap(w.index);
-      return gap + w.text;
-    })
-    .join("");
+/**
+ * Compute gap sizes so the row spans exactly `targetWidth` cells.
+ * Extra space goes between words only (letters stay flush in the font).
+ */
+export function bratGaps(
+  words: string[],
+  targetWidth: number,
+  rowSeed: number,
+): number[] {
+  if (words.length <= 1) return [];
+
+  const textLen = words.reduce((n, w) => n + wordCellWidth(w), 0);
+  const gaps = words.length - 1;
+  let extra = targetWidth - textLen - gaps * MIN_WORD_GAP;
+  if (extra < 0) extra = 0;
+
+  const gapSizes = Array.from({ length: gaps }, () => MIN_WORD_GAP);
+  const order = Array.from({ length: gaps }, (_, i) => i).sort((a, b) => {
+    const ha = hashSeed(rowSeed * 13 + a * 7);
+    const hb = hashSeed(rowSeed * 13 + b * 7);
+    return ha - hb;
+  });
+
+  let remaining = extra;
+  let guard = 0;
+  while (remaining > 0 && guard < 5000) {
+    for (const i of order) {
+      if (remaining <= 0) break;
+      gapSizes[i] += 1;
+      remaining -= 1;
+    }
+    guard += 1;
+  }
+  return gapSizes;
+}
+
+/** @deprecated kept for any callers expecting a flat string — prefer bratGaps */
+export function bratJustify(words: string[], targetWidth: number, rowSeed: number): string {
+  if (words.length === 0) return "";
+  const gaps = bratGaps(words, targetWidth, rowSeed);
+  if (words.length === 1) {
+    return words[0] + " ".repeat(Math.max(0, targetWidth - wordCellWidth(words[0])));
+  }
+  let out = words[0];
+  for (let i = 0; i < gaps.length; i++) {
+    out += " ".repeat(gaps[i]) + words[i + 1];
+  }
+  return out;
+}
+
+/**
+ * Brat block as terminal rows (block font).
+ * Widest packed row sets outer edges; others stretch word-gaps to match.
+ */
+export function renderBratBlock(allWords: string[], revealedCount: number): string[] {
+  const lower = allWords.map((w) => w.toLowerCase());
+  const rows = packRows(lower);
+  if (rows.length === 0 || revealedCount <= 0) return [];
+
+  let blockWidth = 0;
+  for (const row of rows) {
+    const min =
+      row.reduce((n, w) => n + wordCellWidth(w), 0) +
+      Math.max(0, row.length - 1) * MIN_WORD_GAP;
+    if (min > blockWidth) blockWidth = min;
+  }
+
+  let wordOffset = 0;
+  const out: string[] = [];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
+    const rowStart = wordOffset;
+    wordOffset += row.length;
+    if (revealedCount <= rowStart) break;
+
+    const revealed = row.map((_, i) => rowStart + i < revealedCount);
+    const gaps = bratGaps(row, blockWidth, rowIndex + 1);
+    const big = renderBigRow(row, revealed, gaps);
+
+    // No blank spacer between lyric rows — keep the block tight
+    for (const line of big) {
+      // Pad to exact block width for edge hugging
+      if (line.length < blockWidth) {
+        out.push(line + " ".repeat(blockWidth - line.length));
+      } else {
+        out.push(line.slice(0, blockWidth));
+      }
+    }
+  }
+  return out;
 }
 
 /** Active line = last line whose start <= elapsed */
@@ -134,11 +217,6 @@ export class BratRenderer {
     process.stdout.write(RESET + SHOW_CURSOR + CLEAR);
   }
 
-  /**
-   * Only the current timed line is on screen.
-   * Words within that line appear one-by-one as their timestamps hit.
-   * When the next LRC line starts, the previous line is cleared.
-   */
   paint(lines: LineCue[], elapsed: number, status?: PlaybackStatus): void {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
@@ -152,15 +230,14 @@ export class BratRenderer {
 
     if (lineIdx >= 0) {
       const line = lines[lineIdx];
-      const words = revealedWords(line, elapsed).map((w, i) => ({
-        text: w.text.toLowerCase(),
-        index: i,
-      }));
-      const wrapped = layoutLines(words, Math.min(28, Math.max(16, cols - 8)));
-      rendered = wrapped.map((row) => renderLine(row));
+      const allTexts = line.words.map((w) => w.text);
+      const revealed = revealedWords(line, elapsed).length;
+      rendered = renderBratBlock(allTexts, revealed);
     }
 
-    const topPad = Math.max(0, Math.floor((lyricRows - rendered.length) / 2));
+    const blockWidth = rendered.length > 0 ? rendered[0].length : 0;
+    const blockLeft = Math.max(0, Math.floor((cols - blockWidth) / 2));
+    const topPad = Math.max(0, Math.floor((lyricRows - rendered.length) * 0.35));
     const blank = " ".repeat(cols);
     const outLines: string[] = [];
 
@@ -168,11 +245,10 @@ export class BratRenderer {
       const contentIdx = r - topPad;
       if (contentIdx >= 0 && contentIdx < rendered.length) {
         const content = rendered[contentIdx];
-        const left = Math.max(0, Math.floor((cols - content.length) / 2));
         const padded =
-          " ".repeat(left) +
+          " ".repeat(blockLeft) +
           content +
-          " ".repeat(Math.max(0, cols - left - content.length));
+          " ".repeat(Math.max(0, cols - blockLeft - content.length));
         outLines.push(padded.slice(0, cols));
       } else {
         outLines.push(blank);

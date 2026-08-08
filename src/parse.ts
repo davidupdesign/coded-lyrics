@@ -2,6 +2,11 @@ import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 import type { LineCue, LyricsDoc, WordCue } from "./types.js";
 
+/** More words than this → two sequential screens (first half, then second alone) */
+const SPLIT_ABOVE = 6;
+const WORD_MS = 280;
+const BURST_CAP_MS = 4000;
+
 function assertWord(w: WordCue, label: string): WordCue {
   if (typeof w.text !== "string" || w.text.trim() === "") {
     throw new Error(`${label} has empty text`);
@@ -44,6 +49,68 @@ function assertLines(lines: LineCue[]): LineCue[] {
   }
 
   return normalized;
+}
+
+function frontloadWords(tokens: string[], start: number): WordCue[] {
+  const step = Math.min(WORD_MS, BURST_CAP_MS / Math.max(tokens.length, 1)) / 1000;
+  return tokens.map((token, idx) => ({ text: token, start: start + idx * step }));
+}
+
+/**
+ * Long lyric lines become two timed screens: first half alone, then second half alone
+ * (same behavior as separate LRC lines). Short lines are unchanged.
+ */
+export function expandLongLines(lines: LineCue[]): LineCue[] {
+  const out: LineCue[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.words.length <= SPLIT_ABOVE) {
+      out.push(line);
+      continue;
+    }
+
+    const mid = Math.ceil(line.words.length / 2);
+    const first = line.words.slice(0, mid);
+    const second = line.words.slice(mid);
+    const nextStart = lines[i + 1]?.start;
+
+    const distinctSecond =
+      second[0].start > first[0].start + 0.05 && second[0].start > line.start + 0.05;
+
+    if (distinctSecond) {
+      out.push({ start: line.start, words: first });
+      out.push({ start: second[0].start, words: second });
+      continue;
+    }
+
+    // Plain LRC front-load: retime each half as its own screen
+    let secondStart: number;
+    if (nextStart != null && nextStart > line.start) {
+      secondStart = line.start + (nextStart - line.start) / 2;
+    } else {
+      const firstBurst =
+        first.length * Math.min(WORD_MS, BURST_CAP_MS / first.length) / 1000;
+      secondStart = line.start + firstBurst + 0.2;
+    }
+
+    out.push({
+      start: line.start,
+      words: frontloadWords(
+        first.map((w) => w.text),
+        line.start,
+      ),
+    });
+    out.push({
+      start: secondStart,
+      words: frontloadWords(
+        second.map((w) => w.text),
+        secondStart,
+      ),
+    });
+  }
+
+  return assertLines(out);
 }
 
 function wordsToSingleLine(words: WordCue[]): LineCue[] {
@@ -91,7 +158,7 @@ function parseJsonLyrics(raw: string): LyricsDoc {
         };
       }),
     );
-    return { title, lines };
+    return { title, lines: expandLongLines(lines) };
   }
 
   // Legacy flat words → one line (or group by large gaps)
@@ -106,7 +173,7 @@ function parseJsonLyrics(raw: string): LyricsDoc {
         `Word ${i}`,
       );
     });
-    return { title, lines: wordsToSingleLine(words) };
+    return { title, lines: expandLongLines(wordsToSingleLine(words)) };
   }
 
   throw new Error('Lyrics JSON must include a "lines" or "words" array');
@@ -183,7 +250,6 @@ function parseLrcLyrics(raw: string): LyricsDoc {
 
   for (let i = 0; i < lineCues.length; i++) {
     const { start, body } = lineCues[i];
-    const nextStart = lineCues[i + 1]?.start;
     const wordTags = [...body.matchAll(/<(\d+):(\d{2})(?:\.(\d{1,3}))?>/g)];
     const words: WordCue[] = [];
 
@@ -201,14 +267,11 @@ function parseLrcLyrics(raw: string): LyricsDoc {
         }
       }
     } else {
+      // Front-load words in a short burst after line start, then hold until next line.
+      // Stretching across the full gap to nextStart makes late words lag the vocal.
       const tokens = body.trim().split(/\s+/).filter(Boolean);
       if (tokens.length === 0) continue;
-      const end = nextStart ?? start + 2;
-      const span = Math.max(end - start, 0.05);
-      const step = span / tokens.length;
-      tokens.forEach((token, idx) => {
-        words.push({ text: token, start: start + idx * step });
-      });
+      words.push(...frontloadWords(tokens, start));
     }
 
     if (words.length > 0) {
@@ -216,7 +279,7 @@ function parseLrcLyrics(raw: string): LyricsDoc {
     }
   }
 
-  return { title, lines: assertLines(parsed) };
+  return { title, lines: expandLongLines(assertLines(parsed)) };
 }
 
 export function loadLyrics(filePath: string): LyricsDoc {

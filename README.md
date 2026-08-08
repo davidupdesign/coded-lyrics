@@ -57,12 +57,16 @@ Needs a seekable player: **ffplay** (ffmpeg) or **mpv**. On this machine `ffplay
 
 ## Lyrics format
 
-**LRC** (one screen per timestamped line; words within the line reveal in order):
+**LRC** (one screen per timestamped line; words within the line reveal in a short burst, then hold until the next line):
 
 ```lrc
 [00:09.83] Nobody wants to be cool as her
 [00:11.93] Popped out with my jeweler, yeah
 ```
+
+Plain LRC has no per-word times — words are front-loaded (~140ms apart) so they don’t lag when the vocal finishes early. For true karaoke word sync, use enhanced LRC (`<mm:ss.xx>word`) or JSON word timestamps.
+
+Text is laid out in a Brat-style block: short rows, wide uneven gaps between words.
 
 **JSON** with explicit lines:
 
