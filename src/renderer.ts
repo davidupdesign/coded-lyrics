@@ -8,17 +8,45 @@ const CLEAR = `${ESC}[2J${ESC}[H`;
 const RESET = `${ESC}[0m`;
 
 /** Prefer this many words per wrapped row */
-const WORDS_PER_ROW = 3;
+const WORDS_PER_ROW = 4;
 /** Fallback wrap width when the terminal size is unknown */
-const DEFAULT_ROW_CELL_BUDGET = 56;
+const DEFAULT_ROW_CELL_BUDGET = 64;
 /** Minimum gap (cells) between words */
-const MIN_WORD_GAP = 3;
-/** Blank rows between stacked lyric rows so descenders never touch */
+const MIN_WORD_GAP = 2;
+/** Blank rows between stacked lyric rows so outlines never touch */
 const ROW_SPACING = 1;
+
+/** Outline symbols cycled every 100ms. */
+const OUTLINE_RAMP = [
+  "#",
+  "@",
+  "$",
+  "%",
+  "&",
+  "*",
+  "+",
+  "!",
+  "/",
+  "\\",
+  "|",
+  "(",
+  ")",
+  "[",
+  "]",
+  "{",
+  "}",
+  "<",
+  ">",
+  "~",
+  "^",
+] as const;
+
+/** Dense, stable background pattern. */
+const BG_PATTERN = ["=", "=", "+", "-", ":", ".", "=", "+", "~", "-"] as const;
 
 /** Widest block we allow, given the terminal width. */
 export function rowCellBudget(cols: number): number {
-  return Math.max(16, Math.min(cols - 6, 72));
+  return Math.max(16, Math.min(cols - 4, 88));
 }
 
 function themeColors(theme: Theme): { bg: string; fg: string } {
@@ -42,8 +70,17 @@ function hashSeed(n: number): number {
   return h >>> 0;
 }
 
+function patternChar(x: number, y: number): string {
+  const i = hashSeed(x * 73856093 ^ y * 19349663) % BG_PATTERN.length;
+  return BG_PATTERN[i];
+}
+
+function outlineCharNow(): string {
+  return OUTLINE_RAMP[Math.floor(Date.now() / 100) % OUTLINE_RAMP.length];
+}
+
 /**
- * Pack words into short rows of ~2–3 (Brat cover rhythm).
+ * Pack words into short rows of ~3–4 (Brat cover rhythm).
  * Sizes are in block-font cell widths.
  */
 export function packRows(
@@ -72,11 +109,20 @@ export function packRows(
   }
   if (current.length > 0) rows.push(current);
 
+  // Prefer fuller lines: if the last row is a single orphan that still fits
+  // on the previous row within budget, merge it up.
   if (rows.length >= 2) {
     const last = rows[rows.length - 1];
     const prev = rows[rows.length - 2];
-    if (last.length === 1 && prev.length >= 3) {
-      last.unshift(prev.pop()!);
+    if (last.length === 1) {
+      const mergedLen =
+        prev.reduce((n, w) => n + wordCellWidth(w), 0) +
+        wordCellWidth(last[0]) +
+        prev.length * MIN_WORD_GAP;
+      if (prev.length < perRow && mergedLen <= budget) {
+        prev.push(last[0]);
+        rows.pop();
+      }
     }
   }
   return rows;
@@ -142,6 +188,7 @@ export function renderBratBlock(
   budget = DEFAULT_ROW_CELL_BUDGET,
   rowSpacing = ROW_SPACING,
   perRow = WORDS_PER_ROW,
+  outlineChar = "#",
 ): string[] {
   const lower = allWords.map((w) => w.toLowerCase());
   const rows = packRows(lower, perRow, budget);
@@ -165,7 +212,7 @@ export function renderBratBlock(
 
     const revealed = row.map((_, i) => rowStart + i < revealedCount);
     const gaps = bratGaps(row, blockWidth, rowIndex + 1);
-    const big = renderBigRow(row, revealed, gaps);
+    const big = renderBigRow(row, revealed, gaps, outlineChar);
 
     if (out.length > 0) {
       for (let s = 0; s < rowSpacing; s++) out.push(" ".repeat(blockWidth));
@@ -215,6 +262,23 @@ function padRow(content: string, cols: number): string {
   return clipped + " ".repeat(Math.max(0, cols - clipped.length));
 }
 
+function fillPatternRow(cols: number, y: number): string[] {
+  return Array.from({ length: cols }, (_, x) => patternChar(x, y));
+}
+
+/** Overlay `content` onto a pattern row; spaces in content leave the pattern. */
+function compositeRow(pattern: string[], content: string, left: number): string {
+  const out = pattern.slice();
+  const start = Math.max(0, left);
+  for (let i = 0; i < content.length; i++) {
+    const x = start + i;
+    if (x >= out.length) break;
+    const ch = content[i];
+    if (ch !== " ") out[x] = ch;
+  }
+  return out.join("");
+}
+
 export class BratRenderer {
   private theme: Theme;
   private entered = false;
@@ -244,6 +308,7 @@ export class BratRenderer {
 
     const footerRows = 2;
     const lyricRows = Math.max(1, rows - footerRows);
+    const outlineChar = outlineCharNow();
 
     const lineIdx = activeLineIndex(lines, elapsed);
     let rendered: string[] = [];
@@ -256,11 +321,18 @@ export class BratRenderer {
 
       // Pack tighter (more words per row, then no row spacing) until it fits
       for (const perRow of [WORDS_PER_ROW, 4, 5, 6]) {
-        rendered = renderBratBlock(allTexts, revealed, budget, ROW_SPACING, perRow);
+        rendered = renderBratBlock(
+          allTexts,
+          revealed,
+          budget,
+          ROW_SPACING,
+          perRow,
+          outlineChar,
+        );
         if (rendered.length <= lyricRows) break;
       }
       if (rendered.length > lyricRows) {
-        rendered = renderBratBlock(allTexts, revealed, budget, 0, 6);
+        rendered = renderBratBlock(allTexts, revealed, budget, 0, 6, outlineChar);
       }
       if (rendered.length > lyricRows) {
         rendered = rendered.slice(0, Math.max(FONT_H, lyricRows));
@@ -270,20 +342,15 @@ export class BratRenderer {
     const blockWidth = rendered.length > 0 ? rendered[0].length : 0;
     const blockLeft = Math.max(0, Math.floor((cols - blockWidth) / 2));
     const topPad = Math.max(0, Math.floor((lyricRows - rendered.length) * 0.35));
-    const blank = " ".repeat(cols);
     const outLines: string[] = [];
 
     for (let r = 0; r < lyricRows; r++) {
+      const pattern = fillPatternRow(cols, r);
       const contentIdx = r - topPad;
       if (contentIdx >= 0 && contentIdx < rendered.length) {
-        const content = rendered[contentIdx];
-        const padded =
-          " ".repeat(blockLeft) +
-          content +
-          " ".repeat(Math.max(0, cols - blockLeft - content.length));
-        outLines.push(padded.slice(0, cols));
+        outLines.push(compositeRow(pattern, rendered[contentIdx], blockLeft));
       } else {
-        outLines.push(blank);
+        outLines.push(pattern.join(""));
       }
     }
 
@@ -294,6 +361,7 @@ export class BratRenderer {
     const statusLine = ` ${state}  ${pos} / ${dur}`;
     const controlsLine = " space play/pause   ←/→ ±5s   s stop   q quit";
 
+    // Footer overwrites pattern so controls stay readable
     outLines.push(padRow(statusLine, cols));
     outLines.push(padRow(controlsLine, cols));
 
