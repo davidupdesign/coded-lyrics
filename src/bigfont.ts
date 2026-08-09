@@ -1,206 +1,221 @@
 /**
- * Block lyrics font with static `#` outlines.
+ * Half-block word painter.
  *
- * Letters come from the compact atlas in `glyphs.ts`. Each word is painted as
- * solid block ink with a one-cell morphological outline. On entrance, words
- * render slim + sheared (italic) for a short beat before settling to full ink.
- * Empty cells stay blank so the renderer can fill them with the background.
+ * Words are rasterised into a sub-pixel ink grid (one row per glyph sub-row),
+ * then pairs of sub-rows are packed into a single terminal cell using ▀ ▄ █.
+ * That halves the vertical cell count while doubling vertical resolution, so a
+ * glyph pixel ends up square on screen.
+ *
+ * Empty cells stay blank, letting the renderer's ground show through.
  */
-import { GLYPH_H, glyphFor } from "./glyphs.js";
+import { glyphAt, type FontScale } from "./glyphs.js";
 
-/** One cell of padding around ink so the outline has room. */
-const OUTLINE_PAD = 1;
+/** Solid cell — both sub-pixels ink. */
+export const FULL_BLOCK = "█";
+/** Top sub-pixel only. */
+export const UPPER_HALF = "▀";
+/** Bottom sub-pixel only. */
+export const LOWER_HALF = "▄";
 
-export const FONT_H = GLYPH_H + OUTLINE_PAD * 2;
+/** How long a freshly revealed word spends animating in. */
+export const TRANSITION_MS = 280;
+/** How long the previous line lingers, dissolving out, after a line change. */
+export const OUTGOING_MS = 150;
 
-/** Blank cells between letters — keeps neighboring outlines from merging. */
-export const LETTER_GAP = 2;
+/**
+ * Cell attributes. Ordered so `Math.max` resolves priority when two sub-pixels
+ * in the same cell disagree: hot beats dim beats ink beats ground.
+ */
+export const ATTR_GROUND = 0;
+export const ATTR_INK = 1;
+export const ATTR_DIM = 2;
+export const ATTR_HOT = 3;
 
-/** Solid fill for letter bodies. */
-export const INK_CHAR = "█";
+/** Blank sub-columns between letters, scaled with the glyph size. */
+export function letterGap(scale: FontScale): number {
+  return Math.max(1, Math.round((scale.subRows * scale.condense) / 6));
+}
 
-/** Fixed outline character. */
-export const OUTLINE_CHAR = "#";
-
-/** How long a freshly revealed word stays in the slim/italic entrance pose. */
-export const ENTRANCE_MS = 280;
-
-export type WordPaintStyle = "enter" | "solid";
-
-/** Cell width of a single character (including outline padding). */
-export function charCellWidth(ch: string): number {
-  return glyphFor(ch).width + OUTLINE_PAD * 2;
+/** Terminal rows one glyph occupies at a given size. */
+export function fontRows(scale: FontScale): number {
+  return Math.ceil(scale.subRows / 2);
 }
 
 /** Cell width of a word including inter-letter gaps. */
-export function wordCellWidth(word: string): number {
+export function wordCellWidth(word: string, scale: FontScale): number {
   const chars = [...word];
   if (chars.length === 0) return 0;
-  const ink = chars.reduce((n, ch) => n + glyphFor(ch).width, 0);
-  return ink + (chars.length - 1) * LETTER_GAP + OUTLINE_PAD * 2;
+  const ink = chars.reduce((n, ch) => n + glyphAt(ch, scale).width, 0);
+  return ink + (chars.length - 1) * letterGap(scale);
 }
 
-type CellKind = "ink" | "outline" | "empty";
-
-function emptyInk(h: number, w: number): boolean[][] {
+export function emptyInk(h: number, w: number): boolean[][] {
   return Array.from({ length: h }, () => Array.from({ length: w }, () => false));
 }
 
-function buildInkGrid(word: string): boolean[][] {
+/** Rasterise a word into a sub-pixel ink grid, `scale.subRows` tall. */
+export function buildInkGrid(word: string, scale: FontScale): boolean[][] {
   const chars = [...word];
-  const innerW =
-    chars.length === 0
-      ? 0
-      : chars.reduce((n, ch) => n + glyphFor(ch).width, 0) +
-        (chars.length - 1) * LETTER_GAP;
-  const w = innerW + OUTLINE_PAD * 2;
-  const h = FONT_H;
-  const ink = emptyInk(h, w);
+  const w = wordCellWidth(word, scale);
+  const ink = emptyInk(scale.subRows, Math.max(0, w));
+  const gap = letterGap(scale);
 
-  let xOff = OUTLINE_PAD;
+  let xOff = 0;
   for (const ch of chars) {
-    const glyph = glyphFor(ch);
-    for (let gy = 0; gy < GLYPH_H; gy++) {
+    const glyph = glyphAt(ch, scale);
+    for (let gy = 0; gy < scale.subRows; gy++) {
+      const row = glyph.rows[gy];
+      if (!row) continue;
       for (let gx = 0; gx < glyph.width; gx++) {
-        if (glyph.rows[gy][gx] === "#") {
-          ink[gy + OUTLINE_PAD][xOff + gx] = true;
-        }
+        if (row[gx] === "#") ink[gy][xOff + gx] = true;
       }
     }
-    xOff += glyph.width + LETTER_GAP;
+    xOff += glyph.width + gap;
   }
   return ink;
 }
 
-/** Keep only the left edge of each contiguous ink run → thinner strokes. */
-function slimInk(ink: boolean[][]): boolean[][] {
+/**
+ * Morphological dilate — every ink pixel spreads to its 8 neighbours.
+ * Used for the audio-reactive bass pulse, which fattens strokes on a kick.
+ */
+export function dilate(ink: boolean[][]): boolean[][] {
   const h = ink.length;
   const w = ink[0]?.length ?? 0;
   const out = emptyInk(h, w);
-  for (let y = 0; y < h; y++) {
-    let x = 0;
-    while (x < w) {
-      if (!ink[y][x]) {
-        x++;
-        continue;
-      }
-      out[y][x] = true;
-      while (x < w && ink[y][x]) x++;
-    }
-  }
-  return out;
-}
-
-/** Shear rows to the right for an italic lean; width stays fixed. */
-function shearInk(ink: boolean[][]): boolean[][] {
-  const h = ink.length;
-  const w = ink[0]?.length ?? 0;
-  const out = emptyInk(h, w);
-  for (let y = 0; y < h; y++) {
-    const shift = Math.min(OUTLINE_PAD + 1, Math.max(0, Math.floor(y / 2)));
-    for (let x = 0; x < w; x++) {
-      if (!ink[y][x]) continue;
-      const nx = x + shift;
-      if (nx < w) out[y][nx] = true;
-    }
-  }
-  return out;
-}
-
-function outlineFromInk(ink: boolean[][]): CellKind[][] {
-  const h = ink.length;
-  const w = ink[0]?.length ?? 0;
-  const mask: CellKind[][] = Array.from({ length: h }, () =>
-    Array.from({ length: w }, () => "empty" as CellKind),
-  );
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      if (ink[y][x]) {
-        mask[y][x] = "ink";
-        continue;
-      }
-      let near = false;
-      for (let dy = -1; dy <= 1 && !near; dy++) {
+      if (!ink[y][x]) continue;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= h) continue;
         for (let dx = -1; dx <= 1; dx++) {
-          if (dx === 0 && dy === 0) continue;
-          const ny = y + dy;
           const nx = x + dx;
-          if (ny < 0 || ny >= h || nx < 0 || nx >= w) continue;
-          if (ink[ny][nx]) {
-            near = true;
-            break;
-          }
+          if (nx < 0 || nx >= w) continue;
+          out[ny][nx] = true;
         }
       }
-      if (near) mask[y][x] = "outline";
     }
   }
-  return mask;
+  return out;
 }
 
-function paintMask(mask: CellKind[][]): string[] {
-  return mask.map((row) =>
-    row
-      .map((kind) => {
-        if (kind === "ink") return INK_CHAR;
-        if (kind === "outline") return OUTLINE_CHAR;
-        return " ";
-      })
-      .join(""),
-  );
-}
-
-/** Render one word as FONT_H rows of block ink + outline. */
-export function renderWord(
-  word: string,
-  style: WordPaintStyle = "solid",
-): string[] {
-  let ink = buildInkGrid(word);
-  if (style === "enter") {
-    ink = shearInk(slimInk(ink));
-  }
-  return paintMask(outlineFromInk(ink));
-}
-
-/** Blank stand-in with the same width as a word (for unrevealed cues). */
-export function blankWordCells(word: string): string[] {
-  const w = wordCellWidth(word);
-  return Array.from({ length: FONT_H }, () => " ".repeat(w));
-}
-
-export interface BigRowPaint {
+/** Terminal-cell paint: characters plus a parallel attribute grid. */
+export interface CellPaint {
   lines: string[];
-  /** Same geometry as `lines`; true where entrance italic should apply. */
-  italic: boolean[][];
+  attr: Uint8Array[];
 }
 
-/** Paint a justified row: visible words plus the gap sizes between them. */
+/**
+ * Pack a sub-pixel ink grid into terminal rows.
+ * Each output row consumes two sub-rows; the attribute of a cell is the
+ * highest-priority attribute among its ink sub-pixels.
+ */
+export function packHalfBlocks(
+  ink: boolean[][],
+  attrSub: Uint8Array[],
+): CellPaint {
+  const w = ink[0]?.length ?? 0;
+  const rows = Math.ceil(ink.length / 2);
+  const lines: string[] = [];
+  const attr: Uint8Array[] = [];
+
+  for (let r = 0; r < rows; r++) {
+    const topY = r * 2;
+    const botY = topY + 1;
+    const topRow = ink[topY];
+    const botRow = ink[botY];
+    let line = "";
+    const rowAttr = new Uint8Array(w);
+
+    for (let x = 0; x < w; x++) {
+      const top = topRow?.[x] ?? false;
+      const bot = botRow?.[x] ?? false;
+      if (top && bot) {
+        line += FULL_BLOCK;
+        rowAttr[x] = Math.max(attrSub[topY][x], attrSub[botY][x]);
+      } else if (top) {
+        line += UPPER_HALF;
+        rowAttr[x] = attrSub[topY][x];
+      } else if (bot) {
+        line += LOWER_HALF;
+        rowAttr[x] = attrSub[botY][x];
+      } else {
+        line += " ";
+        rowAttr[x] = ATTR_GROUND;
+      }
+    }
+
+    lines.push(line);
+    attr.push(rowAttr);
+  }
+
+  return { lines, attr };
+}
+
+/** What one word contributes to a row: transformed ink plus an accent mask. */
+export interface WordPaint {
+  ink: boolean[][];
+  /** Sub-pixels to draw with the accent colour (wipe edge, landing word). */
+  hot: boolean[][] | null;
+  /** Base attribute for non-hot ink — `ATTR_INK` or `ATTR_DIM`. */
+  attr: number;
+}
+
+/**
+ * Supplies the painted ink for word `index`, or `null` to leave it blank.
+ * The renderer closes over elapsed time, transitions, and audio reactivity.
+ */
+export type WordPainter = (
+  index: number,
+  word: string,
+  scale: FontScale,
+) => WordPaint | null;
+
+/**
+ * Paint a justified row: words at `scale`, separated by `gapSizes`.
+ * Words are composited into one row-wide sub-pixel grid, then packed once.
+ */
 export function renderBigRow(
   words: string[],
-  styles: Array<WordPaintStyle | "hidden">,
   gapSizes: number[],
-): BigRowPaint {
-  const lines = Array.from({ length: FONT_H }, () => "");
-  const italic = Array.from({ length: FONT_H }, () => [] as boolean[]);
-
+  scale: FontScale,
+  paint: WordPainter,
+): CellPaint {
+  let width = 0;
   for (let i = 0; i < words.length; i++) {
-    const style = styles[i];
-    const piece =
-      style === "hidden" ? blankWordCells(words[i]) : renderWord(words[i], style);
-    const isItalic = style === "enter";
-
-    for (let r = 0; r < FONT_H; r++) {
-      lines[r] += piece[r];
-      for (let c = 0; c < piece[r].length; c++) {
-        italic[r].push(isItalic && piece[r][c] !== " ");
-      }
-      if (i < gapSizes.length) {
-        lines[r] += " ".repeat(gapSizes[i]);
-        for (let g = 0; g < gapSizes[i]; g++) italic[r].push(false);
-      }
-    }
+    width += wordCellWidth(words[i], scale);
+    if (i < gapSizes.length) width += gapSizes[i];
   }
 
-  return { lines, italic };
+  const ink = emptyInk(scale.subRows, width);
+  const attrSub = Array.from({ length: scale.subRows }, () => new Uint8Array(width));
+
+  let xOff = 0;
+  for (let i = 0; i < words.length; i++) {
+    const wordWidth = wordCellWidth(words[i], scale);
+    const painted = paint(i, words[i], scale);
+
+    if (painted) {
+      for (let y = 0; y < scale.subRows; y++) {
+        const src = painted.ink[y];
+        if (!src) continue;
+        const hotRow = painted.hot?.[y];
+        for (let x = 0; x < src.length; x++) {
+          if (!src[x]) continue;
+          const dx = xOff + x;
+          if (dx < 0 || dx >= width) continue;
+          ink[y][dx] = true;
+          const a = hotRow?.[x] ? ATTR_HOT : painted.attr;
+          if (a > attrSub[y][dx]) attrSub[y][dx] = a;
+        }
+      }
+    }
+
+    xOff += wordWidth;
+    if (i < gapSizes.length) xOff += gapSizes[i];
+  }
+
+  return packHalfBlocks(ink, attrSub);
 }

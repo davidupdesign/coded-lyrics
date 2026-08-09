@@ -8,3 +8,6 @@ dist/
 *.m4a
 *.flac
 !examples/.gitkeep
+
+# local docs vault (Obsidian)
+/cortex-coded-lyrics/

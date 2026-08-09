@@ -1,6 +1,8 @@
 import type { LyricsDoc, SyncOptions } from "./types.js";
 import { ControllableAudioPlayer } from "./player.js";
 import { BratRenderer } from "./renderer.js";
+import { analyzeAudio } from "./envelope.js";
+import { ColorWriter } from "./theme.js";
 
 export async function runSyncedPlayback(
   audioPath: string,
@@ -8,7 +10,6 @@ export async function runSyncedPlayback(
   options: SyncOptions,
 ): Promise<void> {
   const player = new ControllableAudioPlayer();
-  const renderer = new BratRenderer(options.theme);
   const frameMs = 1000 / options.fps;
 
   let raf: NodeJS.Timeout | null = null;
@@ -16,6 +17,25 @@ export async function runSyncedPlayback(
   let quit = false;
   const stdin = process.stdin;
   const hadRawMode = stdin.isTTY && typeof stdin.setRawMode === "function";
+
+  // Decoding for the envelope and probing the file are independent — overlap
+  // them so reactivity costs no extra startup latency.
+  const [, envelope] = await Promise.all([
+    player.load(audioPath),
+    options.react === "off"
+      ? Promise.resolve(null)
+      : analyzeAudio(audioPath),
+  ]);
+
+  const renderer = new BratRenderer({
+    palette: options.palette,
+    colors: new ColorWriter(options.colorDepth),
+    transition: options.transition,
+    react: options.react,
+    titleCard: options.titleCard,
+    envelope,
+    title: lyrics.title,
+  });
 
   const cleanup = () => {
     if (cleaned) return;
@@ -83,7 +103,6 @@ export async function runSyncedPlayback(
   process.on("SIGTERM", onSignal);
 
   try {
-    await player.load(audioPath);
     renderer.enter();
 
     if (hadRawMode) {
