@@ -7,6 +7,9 @@ dist/
 *.wav
 *.m4a
 *.flac
+*.mp4
+*.mov
+*.webm
 !examples/.gitkeep
 
 # local docs vault (Obsidian)
