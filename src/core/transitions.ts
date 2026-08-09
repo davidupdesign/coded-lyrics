@@ -1,13 +1,16 @@
 /**
  * Word entrance / exit effects.
  *
- * Every effect rewrites the *sub-pixel* ink grid before half-block packing, so
- * it works identically at all glyph scales and never needs to know about
- * terminal cells. Progress `p` runs 0 → 1 and is always derived from playback
+ * Every effect rewrites a rectangular ink mask — for plain-text lyrics that is
+ * a single row, one cell per character — so none of them needs to know what is
+ * being drawn. Progress `p` runs 0 → 1 and is always derived from playback
  * time, never wall-clock state, so scrubbing lands on the same frame twice.
  */
-import { emptyInk } from "./bigfont.js";
 import { hash01, hashSeed } from "./hash.js";
+
+function emptyInk(h: number, w: number): boolean[][] {
+  return Array.from({ length: h }, () => Array.from({ length: w }, () => false));
+}
 
 export type TransitionKind = "wipe" | "dissolve" | "glitch" | "none";
 

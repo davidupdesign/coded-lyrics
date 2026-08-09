@@ -1,9 +1,22 @@
-import { readFileSync } from "node:fs";
-import { extname } from "node:path";
+/**
+ * Lyrics parsing — LRC (plain and enhanced) and JSON.
+ *
+ * Pure and string-in, so the CLI can read a file and the browser can read a
+ * dropped `File` through exactly the same code. The host decides where the text
+ * came from; the format dispatch below is shared, which is what keeps a `.txt`
+ * holding JSON behaving identically in both.
+ */
 import type { LineCue, LyricsDoc, WordCue } from "./types.js";
 
-/** More words than this → two sequential screens (first half, then second alone) */
-const SPLIT_ABOVE = 6;
+/**
+ * More words than this → two sequential screens.
+ *
+ * The cap exists because a screen can only hold so much. At one terminal cell
+ * per character an ordinary lyric line fits easily, so this sits well above a
+ * typical line — splitting more eagerly makes lines flash past faster than the
+ * vocal that they belong to.
+ */
+const SPLIT_ABOVE = 12;
 const WORD_MS = 280;
 const BURST_CAP_MS = 4000;
 
@@ -121,7 +134,7 @@ function wordsToSingleLine(words: WordCue[]): LineCue[] {
   return assertLines([{ start: sorted[0].start, words: sorted }]);
 }
 
-function parseJsonLyrics(raw: string): LyricsDoc {
+export function parseJsonLyrics(raw: string): LyricsDoc {
   let data: unknown;
   try {
     data = JSON.parse(raw);
@@ -210,7 +223,7 @@ function parseWordClock(tag: string): number {
  * Enhanced LRC: line tags plus optional word tags.
  * Each `[mm:ss.xx]` row becomes one LineCue; only that line shows while active.
  */
-function parseLrcLyrics(raw: string): LyricsDoc {
+export function parseLrcLyrics(raw: string): LyricsDoc {
   const lines = raw.split(/\r?\n/);
   let title: string | undefined;
 
@@ -285,23 +298,21 @@ function parseLrcLyrics(raw: string): LyricsDoc {
   return { title, lines: expandLongLines(assertLines(parsed)) };
 }
 
-export function loadLyrics(filePath: string): LyricsDoc {
-  const raw = readFileSync(filePath, "utf8");
-  const ext = extname(filePath).toLowerCase();
+export type LyricsFormat = "json" | "lrc" | "auto";
 
-  if (ext === ".json") {
-    return parseJsonLyrics(raw);
-  }
-  if (ext === ".lrc" || ext === ".txt") {
-    const trimmed = raw.trim();
-    if (trimmed.startsWith("{")) {
-      return parseJsonLyrics(raw);
-    }
-    return parseLrcLyrics(raw);
-  }
+/**
+ * Which parser a body of text wants, when the filename gives no better clue.
+ * JSON lyrics always start with an object; everything else is treated as LRC.
+ */
+export function sniffFormat(raw: string): "json" | "lrc" {
+  return raw.trim().startsWith("{") ? "json" : "lrc";
+}
 
-  if (raw.trim().startsWith("{")) {
-    return parseJsonLyrics(raw);
-  }
-  return parseLrcLyrics(raw);
+/**
+ * Parse lyrics text. `format` is a hint from the file extension: `"json"`
+ * forces the JSON parser, `"auto"` sniffs the content.
+ */
+export function parseLyrics(raw: string, format: LyricsFormat = "auto"): LyricsDoc {
+  const kind = format === "auto" ? sniffFormat(raw) : format;
+  return kind === "json" ? parseJsonLyrics(raw) : parseLrcLyrics(raw);
 }

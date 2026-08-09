@@ -1,8 +1,33 @@
-import type { LyricsDoc, SyncOptions } from "./types.js";
+import type { LyricsDoc, ReactLevel } from "../core/types.js";
+import type { Palette } from "../core/palette.js";
+import type { TransitionKind } from "../core/transitions.js";
 import { ControllableAudioPlayer } from "./player.js";
-import { BratRenderer } from "./renderer.js";
+import { AnsiRenderer } from "./renderer.js";
 import { analyzeAudio } from "./envelope.js";
-import { ColorWriter } from "./theme.js";
+import { openVideo } from "./video.js";
+import { ColorWriter, type ColorDepth } from "./ansi.js";
+
+/** Where the ASCII background comes from, and how it is drawn. */
+export interface VideoOptions {
+  /** Clip to decode, or null to use the audio file when it carries video. */
+  path: string | null;
+  /** Disable the background entirely. */
+  enabled: boolean;
+  /** Brightness multiplier applied before the ramp lookup. */
+  gain: number;
+  /** Knock the video out behind the lyric so plain text stays readable. */
+  plate: boolean;
+}
+
+export interface SyncOptions {
+  fps: number;
+  palette: Palette;
+  colorDepth: ColorDepth;
+  transition: TransitionKind;
+  react: ReactLevel;
+  titleCard: boolean;
+  video: VideoOptions;
+}
 
 export async function runSyncedPlayback(
   audioPath: string,
@@ -18,22 +43,31 @@ export async function runSyncedPlayback(
   const stdin = process.stdin;
   const hadRawMode = stdin.isTTY && typeof stdin.setRawMode === "function";
 
-  // Decoding for the envelope and probing the file are independent — overlap
-  // them so reactivity costs no extra startup latency.
-  const [, envelope] = await Promise.all([
+  // Envelope analysis, the video decoder and probing the file are independent —
+  // overlap them so neither costs extra startup latency. `openVideo` resolves
+  // as soon as ffmpeg spawns; its frames keep arriving during playback.
+  const videoSource = options.video.enabled
+    ? options.video.path ?? audioPath
+    : null;
+
+  const [, envelope, video] = await Promise.all([
     player.load(audioPath),
     options.react === "off"
       ? Promise.resolve(null)
       : analyzeAudio(audioPath),
+    videoSource ? openVideo(videoSource) : Promise.resolve(null),
   ]);
 
-  const renderer = new BratRenderer({
+  const renderer = new AnsiRenderer({
     palette: options.palette,
     colors: new ColorWriter(options.colorDepth),
     transition: options.transition,
     react: options.react,
     titleCard: options.titleCard,
     envelope,
+    video,
+    plate: options.video.plate,
+    videoGain: options.video.gain,
     title: lyrics.title,
   });
 
@@ -50,6 +84,9 @@ export async function runSyncedPlayback(
       stdin.removeListener("data", onKey);
     }
     player.destroy();
+    // The decoder outlives the audio child, so it needs killing explicitly or
+    // it survives the quit.
+    video?.close();
     renderer.exit();
   };
 
