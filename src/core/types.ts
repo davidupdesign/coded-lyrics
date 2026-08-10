@@ -1,6 +1,3 @@
-import type { ColorDepth, Palette } from "./theme.js";
-import type { TransitionKind } from "./transitions.js";
-
 /** How strongly the audio envelope drives the visuals. */
 export type ReactLevel = "off" | "subtle" | "full";
 
@@ -26,13 +23,4 @@ export interface LineCue {
 export interface LyricsDoc {
   title?: string;
   lines: LineCue[];
-}
-
-export interface SyncOptions {
-  fps: number;
-  palette: Palette;
-  colorDepth: ColorDepth;
-  transition: TransitionKind;
-  react: ReactLevel;
-  titleCard: boolean;
 }

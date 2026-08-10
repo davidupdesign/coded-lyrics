@@ -1,13 +1,29 @@
 /**
- * Palettes and colour emission.
+ * Palettes and cell attributes.
  *
  * The default look is a CRT phosphor terminal; brat green is one palette among
- * several. Colours are emitted as truecolor SGR when the terminal advertises
- * it, quantised to the 256-colour cube otherwise, and dropped entirely under
- * `NO_COLOR` / `--no-color`.
+ * several. This module is host-agnostic: it defines what a colour *is*, not how
+ * to emit it. The terminal's SGR encoding lives in `node/ansi.ts`, and the
+ * browser's atlas tinting reads the same `attrColors` this file exports, so the
+ * two can never drift apart.
  */
 
-const ESC = "\x1b";
+/**
+ * Cell attributes — an index into the palette's colour ramp.
+ *
+ * The lyric slots come first, then the ASCII video's brightness tiers, dark to
+ * bright. `attrColors` returns the colours in exactly this order.
+ */
+export const ATTR_GROUND = 0;
+export const ATTR_INK = 1;
+export const ATTR_DIM = 2;
+export const ATTR_HOT = 3;
+/** First video tier; there are `VIDEO_TIERS` of them, ascending in brightness. */
+export const ATTR_VIDEO_0 = 4;
+/** Brightness tiers the ASCII video is quantised to. */
+export const VIDEO_TIERS = 4;
+/** Total attributes, and so the length of every colour ramp. */
+export const ATTR_COUNT = ATTR_VIDEO_0 + VIDEO_TIERS;
 
 export type RGB = readonly [number, number, number];
 
@@ -24,6 +40,11 @@ export interface Palette {
   /** Character sprinkled over the ground, or null for a flat ground. */
   readonly groundChar: string | null;
   readonly groundColor: RGB;
+  /**
+   * Brightest tier of the ASCII video. Kept well below `ink` so the lyric stays
+   * dominant over even a blown-out frame.
+   */
+  readonly videoInk: RGB;
   /** Darken every third terminal row for a CRT scanline. */
   readonly scanlines: boolean;
 }
@@ -35,8 +56,9 @@ export const PALETTES: Record<string, Palette> = {
     ink: [51, 255, 51],
     inkHot: [190, 255, 190],
     inkDim: [18, 92, 18],
-    groundChar: "·",
+    groundChar: ".",
     groundColor: [22, 60, 22],
+    videoInk: [40, 150, 40],
     scanlines: true,
   },
   amber: {
@@ -45,8 +67,9 @@ export const PALETTES: Record<string, Palette> = {
     ink: [255, 176, 0],
     inkHot: [255, 236, 190],
     inkDim: [92, 62, 0],
-    groundChar: "·",
+    groundChar: ".",
     groundColor: [64, 44, 0],
+    videoInk: [150, 105, 0],
     scanlines: true,
   },
   brat: {
@@ -57,6 +80,7 @@ export const PALETTES: Record<string, Palette> = {
     inkDim: [104, 158, 0],
     groundChar: null,
     groundColor: [138, 206, 0],
+    videoInk: [70, 105, 0],
     scanlines: false,
   },
   "360": {
@@ -67,6 +91,7 @@ export const PALETTES: Record<string, Palette> = {
     inkDim: [200, 200, 200],
     groundChar: null,
     groundColor: [255, 255, 255],
+    videoInk: [150, 150, 150],
     scanlines: false,
   },
   vhs: {
@@ -75,8 +100,9 @@ export const PALETTES: Record<string, Palette> = {
     ink: [255, 62, 165],
     inkHot: [110, 240, 255],
     inkDim: [98, 24, 66],
-    groundChar: "▖",
+    groundChar: ":",
     groundColor: [58, 12, 92],
+    videoInk: [150, 40, 100],
     scanlines: true,
   },
   mono: {
@@ -87,6 +113,7 @@ export const PALETTES: Record<string, Palette> = {
     inkDim: [96, 96, 96],
     groundChar: null,
     groundColor: [0, 0, 0],
+    videoInk: [130, 130, 130],
     scanlines: false,
   },
 };
@@ -122,68 +149,21 @@ export function darken(c: RGB, t: number): RGB {
   return blend(c, [0, 0, 0], t);
 }
 
-export type ColorDepth = "truecolor" | "256" | "none";
-
-export function detectColorDepth(): ColorDepth {
-  if (process.env.NO_COLOR != null && process.env.NO_COLOR !== "") return "none";
-  const colorterm = (process.env.COLORTERM ?? "").toLowerCase();
-  if (colorterm.includes("truecolor") || colorterm.includes("24bit")) {
-    return "truecolor";
+/**
+ * Foreground colour per attribute, in ATTR_* index order: ground, ink, dim,
+ * hot, then the video tiers fading up from the background toward `videoInk`.
+ *
+ * The lowest tier starts above `bg` rather than at it — a tier-0 cell still
+ * draws a ramp character, and drawing it in the background colour would make it
+ * invisible while still costing an escape sequence.
+ *
+ * Both hosts build their ramp from this: the terminal wraps each colour in an
+ * SGR, the browser bakes one tinted atlas page per entry.
+ */
+export function attrColors(p: Palette): RGB[] {
+  const ramp: RGB[] = [p.groundColor, p.ink, p.inkDim, p.inkHot];
+  for (let t = 0; t < VIDEO_TIERS; t++) {
+    ramp.push(blend(p.bg, p.videoInk, (t + 1) / VIDEO_TIERS));
   }
-  const termProgram = (process.env.TERM_PROGRAM ?? "").toLowerCase();
-  if (
-    termProgram === "iterm.app" ||
-    termProgram === "wezterm" ||
-    termProgram === "ghostty" ||
-    termProgram === "vscode"
-  ) {
-    return "truecolor";
-  }
-  const term = (process.env.TERM ?? "").toLowerCase();
-  if (term.includes("256color") || term.includes("direct")) return "256";
-  if (term === "" || term === "dumb") return "none";
-  return "256";
-}
-
-/** Nearest index in the xterm 256-colour cube (16..231) plus the grey ramp. */
-function to256(c: RGB): number {
-  const [r, g, b] = c;
-  if (Math.abs(r - g) < 8 && Math.abs(g - b) < 8) {
-    if (r < 8) return 16;
-    if (r > 248) return 231;
-    return 232 + Math.round(((r - 8) / 247) * 23);
-  }
-  const q = (v: number) => Math.round(Math.max(0, v - 35) / 40);
-  return 16 + 36 * q(r) + 6 * q(g) + q(b);
-}
-
-/** Builds the SGR sequences for one palette at the terminal's colour depth. */
-export class ColorWriter {
-  readonly depth: ColorDepth;
-
-  constructor(depth: ColorDepth) {
-    this.depth = depth;
-  }
-
-  fg(c: RGB): string {
-    if (this.depth === "none") return "";
-    if (this.depth === "truecolor") return `${ESC}[38;2;${c[0]};${c[1]};${c[2]}m`;
-    return `${ESC}[38;5;${to256(c)}m`;
-  }
-
-  bg(c: RGB): string {
-    if (this.depth === "none") return "";
-    if (this.depth === "truecolor") return `${ESC}[48;2;${c[0]};${c[1]};${c[2]}m`;
-    return `${ESC}[48;5;${to256(c)}m`;
-  }
-
-  /** Ink colours in ATTR_* index order: ground, ink, dim, hot. */
-  inkRamp(p: Palette): string[] {
-    return [
-      this.fg(p.groundColor),
-      this.fg(p.ink),
-      this.fg(p.inkDim),
-      this.fg(p.inkHot),
-    ];
-  }
+  return ramp;
 }

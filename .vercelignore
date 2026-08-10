@@ -1,0 +1,16 @@
+node_modules
+dist
+src/node
+src/dev
+src/index.ts
+test
+examples
+2TONE
+cortex-coded-lyrics
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.mp4
+*.mov
+*.webm

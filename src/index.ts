@@ -1,17 +1,13 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
-import { Command } from "commander";
-import { loadLyrics } from "./parse.js";
-import { runSyncedPlayback } from "./sync.js";
-import { isReactLevel } from "./types.js";
-import {
-  DEFAULT_PALETTE,
-  detectColorDepth,
-  paletteNames,
-  resolvePalette,
-} from "./theme.js";
-import { TRANSITION_KINDS, isTransitionKind } from "./transitions.js";
+import { Command, Option } from "commander";
+import { loadLyrics } from "./node/parse.js";
+import { runSyncedPlayback } from "./node/sync.js";
+import { isReactLevel } from "./core/types.js";
+import { DEFAULT_PALETTE, paletteNames, resolvePalette } from "./core/palette.js";
+import { detectColorDepth } from "./node/ansi.js";
+import { TRANSITION_KINDS, isTransitionKind } from "./core/transitions.js";
 
 const program = new Command();
 
@@ -28,7 +24,18 @@ program
   .option("--no-title", "Skip the opening title card")
   .option("--no-color", "Render without colour")
   .option("--theme <theme>", "Deprecated alias for --palette (white | black)")
+  .option(
+    "--video <path>",
+    "Clip to render as an ASCII background (defaults to the audio file if it has video)",
+  )
+  .option("--no-video", "Skip the ASCII background")
+  .option("--video-gain <n>", "Brightness multiplier for the background", "1")
+  .option("--no-plate", "Don't clear the background behind the lyric")
   .option("--fps <n>", "Render frame rate", "30")
+  // Pin the grid instead of following the terminal. For comparing renders
+  // against a fixed reference — the web build has to match this exactly.
+  .addOption(new Option("--cols <n>").hideHelp())
+  .addOption(new Option("--rows <n>").hideHelp())
   .action(
     async (
       audio: string,
@@ -40,7 +47,12 @@ program
         title: boolean;
         color: boolean;
         theme?: string;
+        video: string | boolean;
+        videoGain: string;
+        plate: boolean;
         fps: string;
+        cols?: string;
+        rows?: string;
       },
     ) => {
       const audioPath = resolve(audio);
@@ -52,6 +64,21 @@ program
       }
       if (!existsSync(lyricsFile)) {
         console.error(`Lyrics not found: ${lyricsFile}`);
+        process.exit(1);
+      }
+
+      // commander folds --video/--no-video into one key: a string when a path
+      // was given, `false` for --no-video, `true` when neither appeared.
+      const videoEnabled = opts.video !== false;
+      const videoPath = typeof opts.video === "string" ? resolve(opts.video) : null;
+      if (videoPath && !existsSync(videoPath)) {
+        console.error(`Video not found: ${videoPath}`);
+        process.exit(1);
+      }
+
+      const videoGain = Number(opts.videoGain);
+      if (!Number.isFinite(videoGain) || videoGain <= 0 || videoGain > 10) {
+        console.error("--video-gain must be between 0 and 10");
         process.exit(1);
       }
 
@@ -84,6 +111,20 @@ program
         process.exit(1);
       }
 
+      // The renderer reads its grid straight off stdout, so pinning the size is
+      // a matter of lying about the terminal rather than threading an override
+      // through every layer.
+      for (const [flag, key] of [["--cols", "columns"], ["--rows", "rows"]] as const) {
+        const raw = key === "columns" ? opts.cols : opts.rows;
+        if (raw == null) continue;
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1) {
+          console.error(`${flag} must be a positive integer`);
+          process.exit(1);
+        }
+        Object.defineProperty(process.stdout, key, { value: n, configurable: true });
+      }
+
       try {
         const lyrics = loadLyrics(lyricsFile);
         await runSyncedPlayback(audioPath, lyrics, {
@@ -93,6 +134,12 @@ program
           transition: opts.transition,
           react: opts.react,
           titleCard: opts.title,
+          video: {
+            path: videoPath,
+            enabled: videoEnabled,
+            gain: videoGain,
+            plate: opts.plate,
+          },
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
