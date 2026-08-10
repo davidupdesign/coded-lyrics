@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const core = fileURLToPath(new URL("../src/core", import.meta.url));
 
 export default defineConfig({
-  base: "./",
+  base: "/",
   plugins: [react()],
   resolve: {
     alias: { "@core": core },

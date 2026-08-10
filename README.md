@@ -24,6 +24,21 @@ npm --prefix web install
 npm run web            # http://localhost:5173
 ```
 
+### Deploy (Vercel)
+
+The browser app is a static Vite build — no server, no env vars. Connect the repo
+to [Vercel](https://vercel.com) and deploy from the repository root; `vercel.json`
+handles install, build, and output paths.
+
+```bash
+npm --prefix web install
+vercel          # preview
+vercel --prod   # production
+```
+
+Or push to GitHub with the Vercel Git integration — preview deployments are created
+for every branch, production tracks `main`.
+
 Drop an audio file, a lyrics file and (optionally) a video anywhere on the page. A single
 music video works on its own — it supplies both the sound and the picture. **Nothing is
 uploaded**: files are read in the tab via object URLs and never leave the machine, so the
